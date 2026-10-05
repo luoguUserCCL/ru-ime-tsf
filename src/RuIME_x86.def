@@ -1,0 +1,8 @@
+; RuIME.def —— 显式导出 COM DLL 的四个标准入口
+; （用 .def 可避免 MinGW 默认"导出全部符号"，保持导出表干净）
+LIBRARY "RuIME_x86.dll"
+EXPORTS
+    DllCanUnloadNow        = DllCanUnloadNow@0
+    DllGetClassObject      = DllGetClassObject@12
+    DllRegisterServer      = DllRegisterServer@0
+    DllUnregisterServer    = DllUnregisterServer@0

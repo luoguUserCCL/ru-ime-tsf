@@ -1,0 +1,32 @@
+// ============================================================================
+//  RuIME-TSF 资源文件 —— 由 windres 编译为 .res 后与 DLL 一同链接
+//  （图标会作为 TSF 输入法的显示图标；若不想带资源，从构建命令中去掉本文件即可）
+// ============================================================================
+
+#include <windows.h>   // 提供 VOS_NT_WINDOWS32 / VFT_DLL 等宏定义
+
+1 ICON "app.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "080404b0"
+    BEGIN
+      VALUE "FileDescription",  "RuIME TSF Text Service - Russian (JCUKEN)"
+      VALUE "FileVersion",      "1.0.0.0"
+      VALUE "ProductName",      "RuIME-TSF"
+      VALUE "ProductVersion",   "1.0.0.0"
+      VALUE "OriginalFilename", "RuIME.dll"
+      VALUE "LegalCopyright",   "MIT License"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0804, 1200
+  END
+END
