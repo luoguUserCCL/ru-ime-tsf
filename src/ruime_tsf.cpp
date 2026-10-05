@@ -40,6 +40,16 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
+
+// 【Bug 修复】DEFINE_GUID 需要显式实例化：MinGW-w64 的 guiddef.h 只有在定义
+// _GUID_DEFINED（或 INITGUID）时才把 DEFINE_GUID 展开成 const GUID 实例，
+// 否则仅生成 extern "C" 声明 —— IID_ITfCandidateString / IID_ITfCandidateList
+// 因此在链接期报 undefined reference。原代码在包含 <msctf.h> 之后才第一次
+// 使用 DEFINE_GUID，却没有打开该开关，x64 链接必失败。
+#ifndef _GUID_DEFINED
+#define _GUID_DEFINED 1
+#endif
+
 #include <msctf.h>
 #include <new>
 #include <string>
@@ -135,17 +145,26 @@ static const GUID GUID_RuIME_Category_UiElementEnabled =
     {0x049efe40, 0x77f1, 0x4c50, {0x9d, 0xbe, 0x93, 0xfc, 0x4b, 0xd3, 0xfe, 0x0b}};
 
 // TF_MOD_* 修饰键掩码（ITfKeystrokeMgr::PreserveKey 的 uModifiers 用）。
-// MinGW msctf.h 未定义这组宏，按官方 IDL 补齐（与 VK_SHIFT/VK_CONTROL/
-// VK_MENU 的 bit 位约定一致）：
-#ifndef TF_MOD_SHIFT
-#define TF_MOD_SHIFT     0x0001
-#define TF_MOD_CONTROL   0x0002
-#define TF_MOD_ALT       0x0004
-#define TF_MOD_REPEAT    0x0010   // SDK: TF_MOD_REPEAT
-#define TF_MOD_EXTEND    0x0020   // SDK: TF_MOD_EXTEND
-#define TF_MOD_ALTGR     0x0040   // SDK: TF_MOD_ALTGR
-#define TF_MOD_LWIN      0x0080
-#define TF_MOD_RWIN      0x0100
+// 【Bug 修复】MinGW-w64 的 msctf.h *确实*定义了这组宏（TF_MOD_ALT=0x0001,
+// TF_MOD_CONTROL=0x0002, TF_MOD_SHIFT=0x0004, TF_MOD_RALT/RCONTROL/RSHIFT,
+// TF_MOD_LALT/LCONTROL/LSHIFT, TF_MOD_ON_KEYUP, TF_MOD_IGNORE_ALL_MODIFIER），
+// 且数值与 Windows SDK 完全一致 —— 原先代码里"MinGW 未定义、按 VK_SHIFT 位
+// 约定自造一套（SHIFT=0x0001...）"的注释和取值都是错的：若头文件守卫失效，
+// PreserveKey 会用错误的修饰键位注册，Scroll Lock+Shift 等组合永远匹配不上。
+// 现直接采用头文件/SDK 的权威值；同时 MSVC 与 MinGW 均无 TF_MOD_LWIN/RWIN
+// （Win 键没有对应位），删除对它们的引用。
+#ifndef TF_MOD_ALT
+#define TF_MOD_ALT                   0x0001
+#define TF_MOD_CONTROL               0x0002
+#define TF_MOD_SHIFT                 0x0004
+#define TF_MOD_RALT                  0x0008
+#define TF_MOD_RCONTROL              0x0010
+#define TF_MOD_RSHIFT                0x0020
+#define TF_MOD_LALT                  0x0040
+#define TF_MOD_LCONTROL              0x0080
+#define TF_MOD_LSHIFT                0x0100
+#define TF_MOD_ON_KEYUP              0x0200
+#define TF_MOD_IGNORE_ALL_MODIFIER   0x0400
 #endif
 
 // {C4E2A8F6-3B7D-4C19-9E5A-8F2B6D4C7A31} —— 语言配置文件 GUID
@@ -648,28 +667,20 @@ private:
     CModeText* m_modeText;   // 持有接口引用（ITfCandidateList 形态）
 };
 
-// ---- Compartment 汇：收到键盘 OPENCLOSE 变化（保留键触发时 TSF 会发布）
-//      → 刷新模式文本并通知宿主 UIElement 管线更新显示 ----
+// ---- Compartment 汇前向声明；完整定义在 CRuIME 之后（OnChange 需要调用
+//      CRuIME::RefreshModeUI，而该类此时尚未定义 —— 原代码把调用写在类内
+//      导致 "invalid use of incomplete type 'class CRuIME'" 编译错误）----
+class CRuIME;
 class CCompartmentSink : public ITfCompartmentEventSink
 {
 public:
-    explicit CCompartmentSink(class CRuIME* owner) : m_cRef(1), m_owner(owner)
+    explicit CCompartmentSink(CRuIME* owner) : m_cRef(1), m_owner(owner)
     {
         InterlockedIncrement(&g_cObjects);
     }
     virtual ~CCompartmentSink() { InterlockedDecrement(&g_cObjects); }
 
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
-    {
-        if (!ppv) return E_INVALIDARG;
-        *ppv = nullptr;
-        if (IsEqualGUID(riid, IID_IUnknown) || IsEqualGUID(riid, IID_ITfCompartmentEventSink)) {
-            *ppv = static_cast<ITfCompartmentEventSink*>(this);
-            AddRef();
-            return S_OK;
-        }
-        return E_NOINTERFACE;
-    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override;
     ULONG STDMETHODCALLTYPE AddRef() override  { return InterlockedIncrement(&m_cRef); }
     ULONG STDMETHODCALLTYPE Release() override
     {
@@ -680,15 +691,8 @@ public:
 
     // 【Bug 修复】MinGW/SDK 的 ITfCompartmentEventSink 方法名是 OnChange，
     // 原代码声明成 Change(...)=0 既没实现也没有接入任何 compartment ——
-    // "切换语言无反馈"的缺陷正在于此。现按头文件签名实现 OnChange，并在
-    // 下方提供完整定义（此前只有声明、没有实现体，链接必失败）。
-    HRESULT STDMETHODCALLTYPE OnChange(REFGUID rguid) override
-    {
-        if (IsEqualGUID(rguid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) {
-            if (m_owner) m_owner->RefreshModeUI();
-        }
-        return S_OK;
-    }
+    // "切换语言无反馈"的缺陷正在于此。实现体见本文件 CRuIME 定义之后。
+    HRESULT STDMETHODCALLTYPE OnChange(REFGUID rguid) override;
 
 private:
     LONG    m_cRef;
@@ -697,21 +701,26 @@ private:
 
 // ============================================================================
 //  CRuIME —— TIP 主体：ITfTextInputProcessor + ITfKeyEventSink
-//                              + ITfFunctionProvider（模式文本）
 //                              + ITfUIElement / ITfUIElementSink（模式指示 UI）
+//                  模式文本经独立的 CModeFunctionProvider 暴露给宿主
 //  （CCompartmentSink 定义在本类之后，其 OnChange 在文件末尾给出实现）
 // ============================================================================
 
+// 【Bug 修复】原先 CRuIME 同时继承 ITfFunctionProvider 与 ITfUIElement ——
+// 两者在 MinGW msctf.h 里的 GetDescription(BSTR*) 签名完全相同，一个类里
+// 无法给出两份不同实现（error: cannot be overloaded）。现把 FunctionProvider
+// 职责交给独立的 CModeFunctionProvider（本文件早已定义但从未接线使用），
+// CRuIME 只保留 TextInputProcessor / KeyEventSink / UIElement / UIElementSink。
 class CRuIME : public ITfTextInputProcessor,
                public ITfKeyEventSink,
-               public ITfFunctionProvider,
                public ITfUIElement,
                public ITfUIElementSink
 {
 public:
     CRuIME()
         : m_cRef(1), m_ptim(nullptr), m_tid(0), m_dwKeySinkCookie(0),
-          m_pKeystrokeMgr(nullptr), m_pModeText(nullptr), m_pCompartment(nullptr),
+          m_pKeystrokeMgr(nullptr), m_pModeText(nullptr), m_pModeFP(nullptr),
+          m_pCompartment(nullptr),
           m_pCompSink(nullptr), m_dwCompSinkCookie(0), m_dwUIElSinkCookie(0),
           m_uiElId(0), m_fUIElShown(FALSE)
     {
@@ -724,6 +733,11 @@ public:
     }
 
     // ---- IUnknown ----
+    // 【Bug 修复】原实现分支里先给 *ppv 赋了正确的偏移指针，随后又被
+    // "static_cast<void*>(static_cast<ITfTextInputProcessor*>(this))" 无条件
+    // 覆盖成规范接口 —— 多重继承下这会返回错误 vtable，宿主调用
+    // ITfUIElement/ITfFunctionProvider 等方法时会踩内存。现改为：命中即
+    // AddRef 返回，未命中返回 E_NOINTERFACE（*ppv 保持 nullptr）。
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
     {
         if (!ppv) return E_INVALIDARG;
@@ -732,8 +746,6 @@ public:
             *ppv = static_cast<ITfTextInputProcessor*>(this);
         } else if (IsEqualGUID(riid, IID_ITfKeyEventSink)) {
             *ppv = static_cast<ITfKeyEventSink*>(this);
-        } else if (IsEqualGUID(riid, IID_ITfFunctionProvider)) {
-            *ppv = static_cast<ITfFunctionProvider*>(this);
         } else if (IsEqualGUID(riid, IID_ITfUIElement)) {
             *ppv = static_cast<ITfUIElement*>(this);
         } else if (IsEqualGUID(riid, IID_ITfUIElementSink)) {
@@ -741,10 +753,8 @@ public:
         } else {
             return E_NOINTERFACE;
         }
-        *ppv = static_cast<void*>(static_cast<ITfTextInputProcessor*>(this));
-        // 上面一行被各分支覆盖前先取规范指针？——不，COM 要求返回与请求匹配的
-        // 接口指针；重新赋值会破坏多重继承偏移。正确做法：分支里直接 AddRef 返回。
-        return FinishQI(ppv, riid);
+        AddRef();
+        return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override  { return InterlockedIncrement(&m_cRef); }
     ULONG STDMETHODCALLTYPE Release() override
@@ -778,15 +788,20 @@ public:
         }
 
         // 3) 注册 Scroll Lock 保留键（俄语/英文切换）
-        //    【Bug 修复】原先只登记 uModifiers=0 一种组合：按住 Shift/Ctrl/Alt/Win
+        //    【Bug 修复】原先只登记 uModifiers=0 一种组合：按住 Shift/Ctrl/Alt
         //    再按 Scroll Lock 时不匹配保留键；而 VK_SCROLL(0x32) 与 '2' 同码，
         //    sink 又把"Shift+数字行"一律吃掉 → Scroll Lock 被当成 Shift+2 误插 '"'，
-        //    语言永远切不动。现按 MinGW msctf.h 的 TF_MOD_* 位约定注册全部修饰键
-        //    变体（TF_MOD_SHIFT/CONTROL/ALT/LWIN/RWIN），任何组合都先进保留键管线；
+        //    语言永远切不动。现按 MinGW msctf.h / Windows SDK 的 TF_MOD_* 位约定
+        //    分别登记左右修饰键变体 LSHIFT/RSHIFT、LCONTROL/RCONTROL、LALT/RALT
+        //    （MSVC 与 MinGW 均无 TF_MOD_LWIN/RWIN，Win 键没有对应位，原代码引用它们是编译错误），
+        //    任何组合都先进保留键管线；
         //    WantEatKey() 同时显式豁免 VK_SCROLL，双保险。
         if (SUCCEEDED(m_ptim->QueryInterface(IID_ITfKeystrokeMgr, (void**)&m_pKeystrokeMgr)) && m_pKeystrokeMgr) {
             static const WORD kMods[] = {
-                0, TF_MOD_SHIFT, TF_MOD_CONTROL, TF_MOD_ALT, TF_MOD_LWIN, TF_MOD_RWIN
+                0,
+                TF_MOD_SHIFT,   TF_MOD_LSHIFT,   TF_MOD_RSHIFT,
+                TF_MOD_CONTROL, TF_MOD_LCONTROL, TF_MOD_RCONTROL,
+                TF_MOD_ALT,     TF_MOD_LALT,     TF_MOD_RALT
             };
             for (WORD mod : kMods) {
                 TF_PRESERVEDKEY pk;
@@ -817,6 +832,17 @@ public:
                 }
                 pCompSrc->Release();
             }
+        }
+
+        // 4b) 懒创建并持有模式 Function Provider —— 宿主可经
+        //     ITfThreadMgr::GetFunctionProvider(GUID_RuIME_ModeFunctionProvider)
+        //     取到它（TSF 会查询各激活 TIP 的 ITfFunctionProvider），再
+        //     GetFunction 拿模式文本。CModeFunctionProvider 内部与 ModeTextObj()
+        //     共享同一个 CModeText（同一 IID_ITfCandidateList 引用计数管理）。
+        if (!m_pModeFP) {
+            m_pModeFP = new (std::nothrow) CModeFunctionProvider();
+            if (m_pModeFP)
+                m_pModeFP->ModeText();   // 预热：确保模式文本对象已建立
         }
 
         // 5) 向宿主注册模式指示 UIElement（QI 不到则优雅降级）
@@ -872,7 +898,10 @@ public:
         // 反注册全部 Scroll Lock 保留键变体（与 PreserveKey 一一对应）
         if (m_pKeystrokeMgr) {
             static const WORD kMods[] = {
-                0, TF_MOD_SHIFT, TF_MOD_CONTROL, TF_MOD_ALT, TF_MOD_LWIN, TF_MOD_RWIN
+                0,
+                TF_MOD_SHIFT,   TF_MOD_LSHIFT,   TF_MOD_RSHIFT,
+                TF_MOD_CONTROL, TF_MOD_LCONTROL, TF_MOD_RCONTROL,
+                TF_MOD_ALT,     TF_MOD_LALT,     TF_MOD_RALT
             };
             for (WORD mod : kMods) {
                 TF_PRESERVEDKEY pk;
@@ -883,7 +912,7 @@ public:
             m_pKeystrokeMgr->Release();
             m_pKeystrokeMgr = nullptr;
         }
-        if (m_modeTextHolder()) { }   // no-op，保持成员释放顺序清晰
+        if (m_pModeFP)   { m_pModeFP->Release();   m_pModeFP = nullptr; }
         if (m_pModeText) { m_pModeText->Release(); m_pModeText = nullptr; }
         if (m_ptim) {
             if (m_dwKeySinkCookie) {
@@ -965,33 +994,15 @@ public:
         return S_OK;
     }
 
-    // ---- ITfFunctionProvider（本 TIP 自己作为 provider，供宿主取回模式文本）----
-    HRESULT STDMETHODCALLTYPE GetType(GUID* pguid) override
-    {
-        if (!pguid) return E_INVALIDARG;
-        *pguid = GUID_RuIME_ModeFunctionProvider;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetDescription(BSTR* pbstr) override
-    {
-        if (!pbstr) return E_INVALIDARG;
-        *pbstr = SysAllocString(MODE_UI_DESC);
-        return *pbstr ? S_OK : E_OUTOFMEMORY;
-    }
-    HRESULT STDMETHODCALLTYPE GetFunction(REFGUID, REFIID riid, IUnknown** pUnk) override
-    {
-        if (!pUnk) return E_INVALIDARG;
-        *pUnk = nullptr;
-        CModeText* pText = ModeTextObj();
-        if (!pText) return E_OUTOFMEMORY;
-        return pText->QueryInterface(riid, reinterpret_cast<void**>(pUnk));
-    }
-
     // ---- ITfUIElement（MinGW 头文件声明的最小子集：描述/GUID/Show/IsShown）----
+    // 【Bug 修复】原写法 `return ITfFunctionProvider::GetDescription(...)`
+    // 在 CRuIME 不再继承 ITfFunctionProvider 后无法编译；直接按 MinGW
+    // msctf.h 的 ITfUIElement::GetDescription(BSTR*) 签名独立实现。
     HRESULT STDMETHODCALLTYPE GetDescription(BSTR* description) override
     {
-        // 与 ITfFunctionProvider::GetDescription 签名相同，共用实现即可
-        return ITfFunctionProvider::GetDescription(description);
+        if (!description) return E_INVALIDARG;
+        *description = SysAllocString(MODE_UI_DESC);
+        return *description ? S_OK : E_OUTOFMEMORY;
     }
     HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override
     {
@@ -1063,22 +1074,6 @@ public:
     }
 
 private:
-    // QI 辅助：按请求的 IID 返回正确的接口指针（处理多重继承偏移）
-    void* NormPtr(REFIID riid)
-    {
-        if (IsEqualGUID(riid, IID_ITfFunctionProvider)) return static_cast<ITfFunctionProvider*>(this);
-        if (IsEqualGUID(riid, IID_ITfUIElement))        return static_cast<ITfUIElement*>(this);
-        if (IsEqualGUID(riid, IID_ITfUIElementSink))    return static_cast<ITfUIElementSink*>(this);
-        if (IsEqualGUID(riid, IID_ITfKeyEventSink))     return static_cast<ITfKeyEventSink*>(this);
-        return static_cast<ITfTextInputProcessor*>(this);   // IUnknown / ITfTextInputProcessor
-    }
-    HRESULT FinishQI(void** ppv, REFIID riid)
-    {
-        *ppv = NormPtr(riid);
-        AddRef();
-        return S_OK;
-    }
-    void* modeTextHolder() { return m_pModeText; }
 
     // 经同步编辑会话插入字符；宿主拒绝同步锁时退回异步
     HRESULT InsertChar(ITfContext* pic, wchar_t ch)
@@ -1101,6 +1096,7 @@ private:
     DWORD             m_dwKeySinkCookie;
     ITfKeystrokeMgr*  m_pKeystrokeMgr;
     CModeText*        m_pModeText;       // 强引用（new 出来的对象所有权 + QI 引用合一，析构时 Release）
+    CModeFunctionProvider* m_pModeFP;    // 模式文本 Function Provider（懒创建，Deactivate 释放）
     ITfCompartment*   m_pCompartment;
     CCompartmentSink* m_pCompSink;
     DWORD             m_dwCompSinkCookie;
@@ -1108,6 +1104,35 @@ private:
     DWORD             m_uiElId;
     WINBOOL           m_fUIElShown;
 };
+
+// ============================================================================
+//  CCompartmentSink —— QueryInterface / OnChange 实现体
+//  （必须放在 CRuIME 完整定义之后：OnChange 要调用 CRuIME::RefreshModeUI，
+//    原代码把该调用写在类内联实现里，触发 "invalid use of incomplete type"）
+// ============================================================================
+
+HRESULT CCompartmentSink::QueryInterface(REFIID riid, void** ppv)
+{
+    if (!ppv) return E_INVALIDARG;
+    *ppv = nullptr;
+    if (IsEqualGUID(riid, IID_IUnknown) || IsEqualGUID(riid, IID_ITfCompartmentEventSink)) {
+        *ppv = static_cast<ITfCompartmentEventSink*>(this);
+        AddRef();
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+HRESULT CCompartmentSink::OnChange(REFGUID rguid)
+{
+    // 【Bug 修复】原先方法名写成 Change（头文件里没有这个纯虚函数），既没
+    // 实现 ITfCompartmentEventSink 的真正槽位，也没接入任何 compartment ——
+    // 切换语言时宿主毫无可见反馈。现按 MinGW msctf.h 的权威签名实现 OnChange：
+    // OPENCLOSE 变化 → 重建模式文本并通知宿主 UIElement 管线刷新。
+    if (m_owner && IsEqualGUID(rguid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE))
+        m_owner->RefreshModeUI();
+    return S_OK;
+}
 
 // ============================================================================
 //  CClassFactory

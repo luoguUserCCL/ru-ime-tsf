@@ -47,7 +47,7 @@ if %compile_res% equ 1 (
 echo [2/3] 编译 RuIME_x64.dll ...
 
 if %compile_x64% equ 1 (
-    x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -shared -DUNICODE -D_UNICODE -finput-charset=UTF-8 src\ruime_tsf.cpp src\RuIME_x64.def %RES_X64_ARG% -o RuIME_x64.dll -luuid -lole32 -ladvapi32 -static-libgcc -static-libstdc++
+    x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -shared -DUNICODE -D_UNICODE -finput-charset=UTF-8 src\ruime_tsf.cpp src\RuIME_x64.def %RES_X64_ARG% -o RuIME_x64.dll -luuid -lole32 -loleaut32 -ladvapi32 -static-libgcc -static-libstdc++
 
     if errorlevel 1 (
         echo.
@@ -62,7 +62,7 @@ if %compile_x64% equ 1 (
 
 echo [3/3] 编译 RuIME_x86.dll ...
 if %compile_x86% equ 1 (
-    i686-w64-mingw32-g++ -O2 -std=c++17 -Wall -shared -DUNICODE -D_UNICODE -finput-charset=UTF-8 src\ruime_tsf.cpp src\RuIME_x86.def %RES_X86_ARG% -o RuIME_x86.dll -luuid -lole32 -ladvapi32 -static-libgcc -static-libstdc++
+    i686-w64-mingw32-g++ -O2 -std=c++17 -Wall -shared -DUNICODE -D_UNICODE -finput-charset=UTF-8 src\ruime_tsf.cpp src\RuIME_x86.def %RES_X86_ARG% -o RuIME_x86.dll -luuid -lole32 -loleaut32 -ladvapi32 -static-libgcc -static-libstdc++
 
     if errorlevel 1 (
         echo.
